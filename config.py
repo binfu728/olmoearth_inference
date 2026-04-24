@@ -22,7 +22,7 @@ import logging
 import warnings
 from dataclasses import dataclass, fields, is_dataclass
 from importlib import import_module
-from typing import Any, TypeVar
+from typing import Any, TypeVar, get_type_hints
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +60,15 @@ def require_olmo_core(operation: str = "This operation") -> None:
 
 C = TypeVar("C", bound="_StandaloneConfig")
 
+# Mapping from helios class paths to actual class references
+# This is needed because helios.nn.flexihelios is just a deprecated alias
+_HELIOS_CLASS_MAPPING = {
+    "helios.nn.flexihelios.EncoderConfig": "nn.flexi_vit.EncoderConfig",
+    "helios.nn.flexihelios.PredictorConfig": "nn.flexi_vit.PredictorConfig",
+    "helios.nn.flexihelios.ReconstructorConfig": "nn.flexi_vit.ReconstructorConfig",
+    "helios.nn.latent_mim.LatentMIMConfig": "nn.galileo.GalileoConfig",
+}
+
 
 @dataclass
 class _StandaloneConfig:
@@ -79,7 +88,14 @@ class _StandaloneConfig:
 
     @classmethod
     def _resolve_class(cls, class_name: str) -> type:
-        """Resolve a fully-qualified class name to a class object."""
+        """Resolve a fully-qualified class name to a class object.
+        
+        Handles helios class paths by mapping them to actual class references.
+        """
+        # Check if this is a helios class that needs mapping
+        if class_name in _HELIOS_CLASS_MAPPING:
+            class_name = _HELIOS_CLASS_MAPPING[class_name]
+        
         if "." not in class_name:
             raise ValueError(f"Class name must be fully qualified (got '{class_name}')")
         *modules, cls_name = class_name.split(".")
@@ -89,7 +105,10 @@ class _StandaloneConfig:
 
     @classmethod
     def _clean_data(cls, data: Any) -> Any:
-        """Recursively clean data, resolving _CLASS_ fields to actual instances."""
+        """Recursively clean data, resolving _CLASS_ fields to actual instances.
+        
+        Also handles nested dataclass fields by instantiating them properly.
+        """
         if isinstance(data, dict):
             # Check if this dict represents a config class
             class_name = data.get(cls.CLASS_NAME_FIELD)
@@ -103,10 +122,20 @@ class _StandaloneConfig:
                 resolved_cls = cls._resolve_class(class_name)
                 if not is_dataclass(resolved_cls):
                     raise TypeError(f"Class '{class_name}' is not a dataclass")
-                # Get the field names for this dataclass
-                field_names = {f.name for f in fields(resolved_cls)}
+                # Get the field names and types for this dataclass
+                field_info = {f.name: f for f in fields(resolved_cls)}
+                field_names = set(field_info.keys())
                 # Filter to only include valid fields
                 valid_kwargs = {k: v for k, v in cleaned.items() if k in field_names}
+                
+                # For nested dataclass fields that are still dicts, instantiate them
+                for field_name, field_obj in field_info.items():
+                    if field_name in valid_kwargs and isinstance(valid_kwargs[field_name], dict):
+                        field_type = field_obj.type
+                        # Check if it's a Config subclass
+                        if isinstance(field_type, type) and issubclass(field_type, _StandaloneConfig):
+                            valid_kwargs[field_name] = field_type.from_dict(valid_kwargs[field_name])
+                
                 try:
                     return resolved_cls(**valid_kwargs)
                 except TypeError as e:
@@ -151,8 +180,17 @@ class _StandaloneConfig:
             return cleaned
         elif isinstance(cleaned, dict):
             # Get field names for this class
-            field_names = {f.name for f in fields(cls)}
+            field_info = {f.name: f for f in fields(cls)}
+            field_names = set(field_info.keys())
             valid_kwargs = {k: v for k, v in cleaned.items() if k in field_names}
+            
+            # For nested dataclass fields that are still dicts, instantiate them
+            for field_name, field_obj in field_info.items():
+                if field_name in valid_kwargs and isinstance(valid_kwargs[field_name], dict):
+                    field_type = field_obj.type
+                    if isinstance(field_type, type) and issubclass(field_type, _StandaloneConfig):
+                        valid_kwargs[field_name] = field_type.from_dict(valid_kwargs[field_name])
+            
             return cls(**valid_kwargs)
         else:
             raise TypeError(f"Expected dict, got {type(cleaned)}")

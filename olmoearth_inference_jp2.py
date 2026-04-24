@@ -1,30 +1,40 @@
 """
-OlmoEarth JP2图像读取与推理脚本 (简化版)
-========================================
+OlmoEarth JP2图像读取与推理脚本
+================================
 处理Sentinel-2 L2A的.jp2文件
 
 目录结构：
-    olmoearth/
-    ├── olmoearth_inference_jp2.py   # 本脚本
-    ├── config.py                     # 配置
-    ├── datatypes.py                  # 数据结构
-    ├── nn/                          # 神经网络
-    │   ├── galileo.py
-    │   ├── flexi_vit.py
-    │   ├── attention.py
-    │   ├── flexi_patch_embed.py
-    │   ├── encodings.py
-    │   ├── pooling.py
-    │   └── utils.py
+    olmoearth_inference/
+    ├── olmoearth_inference_jp2.py   # 本脚本（推理入口）
+    ├── config.py                     # 配置类
+    ├── datatypes.py                  # 数据结构定义
+    ├── types.py                      # 类型别名
+    ├── nn/                          # 神经网络模块
+    │   ├── galileo.py               # Galileo模型
+    │   ├── flexi_vit.py             # Encoder/Decoder
+    │   ├── attention.py              # 注意力机制
+    │   ├── flexi_patch_embed.py      # Patch嵌入
+    │   ├── encodings.py              # 位置编码
+    │   ├── pooling.py                # 池化
+    │   ├── tokenization.py           # 分词配置
+    │   └── utils.py                  # 工具函数
     ├── data/                        # 数据处理
-    │   ├── constants.py
-    │   └── normalize.py
-    └── params/                      # 模型权重
-        ├── config.json
-        └── weights.pth
+    │   ├── constants.py              # 模态定义
+    │   ├── normalize.py              # 归一化
+    │   └── norm_configs/             # 归一化参数
+    └── params/                       # 模型权重
+        ├── config.json               # 模型配置
+        └── weights.pth               # 权重文件
 
 使用方法：
     python olmoearth_inference_jp2.py --jp2_dir /path/to/sentinel2_safe
+    
+参数说明：
+    --jp2_dir: Sentinel-2 SAFE文件夹路径
+    --image_size: 输入图像大小（默认64）
+    --patch_size: Patch大小（默认4）
+    --target_size: 读取图像尺寸（默认512）
+    --device: 运行设备（默认cuda）
 """
 
 import argparse
@@ -127,7 +137,12 @@ def prepare_input(normalized_image: np.ndarray, image_size: int = 64) -> tuple:
 
 
 def load_model():
-    """加载模型"""
+    """加载模型
+    
+    支持两种config.json格式：
+    1. 简化版：直接包含encoder_config和decoder_config
+    2. 原始版：嵌套在"model"键下（带_CLASS_字段）
+    """
     import json
     
     script_dir = Path(__file__).parent
@@ -138,7 +153,15 @@ def load_model():
         config_dict = json.load(f)
     
     from nn.galileo import Galileo, GalileoConfig
-    model_config = GalileoConfig.from_dict(config_dict["model"])
+    
+    # 自动检测config格式并提取正确的配置
+    if "model" in config_dict and isinstance(config_dict["model"], dict):
+        # 原始格式：配置嵌套在"model"键下
+        model_config = GalileoConfig.from_dict(config_dict["model"])
+    else:
+        # 简化格式：配置直接在根层级
+        model_config = GalileoConfig.from_dict(config_dict)
+    
     model = model_config.build()
     
     state_dict = torch.load(weights_path, map_location='cpu')
@@ -180,7 +203,7 @@ def main():
     args = parser.parse_args()
     
     print("=" * 60)
-    print("OlmoEarth JP2 Inference (简化版)")
+    print("OlmoEarth JP2 Inference")
     print("=" * 60)
     
     # 1. 读取JP2
