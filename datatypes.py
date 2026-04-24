@@ -14,8 +14,8 @@ from torch import Tensor
 from torch.distributed import DeviceMesh
 from torch.distributed.tensor import distribute_tensor
 
-from olmoearth_pretrain.data.constants import MISSING_VALUE, TIMESTAMPS, Modality
-from olmoearth_pretrain.types import ArrayTensor
+from data.constants import MISSING_VALUE, TIMESTAMPS, Modality
+from types import ArrayTensor
 
 logger = logging.getLogger(__name__)
 

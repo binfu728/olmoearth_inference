@@ -4,12 +4,16 @@ import json
 import logging
 from enum import Enum
 from importlib.resources import files
+from pathlib import Path
 
 import numpy as np
 
-from olmoearth_pretrain.data.constants import ModalitySpec
+from data.constants import ModalitySpec
 
 logger = logging.getLogger(__name__)
+
+# Get the path to the norm_configs directory
+_NORM_CONFIGS_DIR = Path(__file__).parent / "norm_configs"
 
 
 def load_predefined_config() -> dict[str, dict[str, dict[str, float]]]:
@@ -18,9 +22,7 @@ def load_predefined_config() -> dict[str, dict[str, dict[str, float]]]:
     The normalization config maps from modality -> band name to a dictionary with min
     and max keys.
     """
-    with (
-        files("olmoearth_pretrain.data.norm_configs") / "predefined.json"
-    ).open() as f:
+    with (_NORM_CONFIGS_DIR / "predefined.json").open() as f:
         return json.load(f)
 
 
@@ -30,7 +32,7 @@ def load_computed_config() -> dict[str, dict]:
     The normalization config maps from modality -> band name to a dictionary with mean
     and std keys.
     """
-    with (files("olmoearth_pretrain.data.norm_configs") / "computed.json").open() as f:
+    with (_NORM_CONFIGS_DIR / "computed.json").open() as f:
         return json.load(f)
 
 
