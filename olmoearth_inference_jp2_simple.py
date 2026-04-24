@@ -130,16 +130,15 @@ def load_model_direct():
     
     模型参数来自OlmoEarth-v1-Base:
     - embedding_size: 768
-    - depth: 12 (encoder) / 4 (decoder)
+    - depth: 12 (encoder)
     - num_heads: 12
     - mlp_ratio: 4.0
     
-    注意: EncoderConfig 和 PredictorConfig 中 supported_modalities 是 @property，
-    不是字段。它们通过 supported_modality_names 自动计算得出。
+    注意: EncoderConfig 中 supported_modalities 是 @property，
+    不是字段。它通过 supported_modality_names 自动计算得出。
     因此不要直接传递 supported_modalities 参数。
     """
-    from nn.galileo import Galileo
-    from nn.flexi_vit import EncoderConfig, PredictorConfig
+    from nn.flexi_vit import EncoderConfig
     
     # 定义支持的模态（只需要传递名称列表，Config会自动计算 supported_modalities）
     modalities = [
@@ -148,7 +147,6 @@ def load_model_direct():
     ]
     
     # Encoder配置
-    # 注意: 只传递 supported_modality_names，不要传递 supported_modalities
     encoder_config = EncoderConfig(
         supported_modality_names=modalities,
         embedding_size=768,
@@ -171,30 +169,11 @@ def load_model_direct():
         use_linear_patch_embed=False,  # 必须是False以匹配checkpoint（训练时使用Conv2d）
     )
     
-    # Decoder配置
-    # 注意: 只传递 supported_modality_names，不要传递 supported_modalities
-    decoder_config = PredictorConfig(
-        supported_modality_names=modalities,
-        encoder_embedding_size=768,
-        decoder_embedding_size=768,
-        depth=4,
-        mlp_ratio=4.0,
-        num_heads=12,
-        max_sequence_length=12,
-        drop_path=0.0,
-        learnable_channel_embeddings=True,
-        random_channel_embeddings=False,
-        use_flash_attn=False,
-        qk_norm=False,
-    )
-    
-    # 构建模型
+    # 只构建 encoder
     encoder = encoder_config.build()
-    decoder = decoder_config.build()
-    model = Galileo(encoder=encoder, decoder=decoder, reconstructor=None)
     
-    print("模型构建成功")
-    return model
+    print("模型构建成功（仅 Encoder）")
+    return encoder
 
 
 def main():
@@ -237,26 +216,31 @@ def main():
         print("加载权重文件...")
         state_dict = torch.load(weights_path, map_location='cpu')
         
-        # 处理分布式训练带来的前缀问题
-        # 常见前缀：module., _forward_module., model.module. 等
+        # 处理权重前缀
+        # 1. 清洗常见的分布式前缀
+        # 2. 剥离 encoder. 前缀，因为我们现在 model 本身就是 encoder
+        # 3. 丢弃 decoder 和 target_encoder 权重
         new_state_dict = {}
-        prefix_count = 0
+        decoder_count = 0
         for k, v in state_dict.items():
-            if k.startswith('module.'):
-                new_key = k[7:]  # 去掉 "module." 前缀
-                prefix_count += 1
-            elif k.startswith('_forward_module.'):
-                new_key = k[16:]  # 去掉 "_forward_module." 前缀
-                prefix_count += 1
-            elif k.startswith('model.module.'):
-                new_key = k[13:]  # 去掉 "model.module." 前缀
-                prefix_count += 1
-            else:
-                new_key = k
+            new_key = k.replace('module.', '').replace('_forward_module.', '').replace('model.module.', '')
+            
+            # 丢弃 decoder 权重，节约内存
+            if new_key.startswith('decoder.'):
+                decoder_count += 1
+                continue
+            if new_key.startswith('target_encoder.'):
+                decoder_count += 1
+                continue
+                
+            # 剥离 encoder. 前缀，因为我们现在 model 本身就是 encoder
+            if new_key.startswith('encoder.'):
+                new_key = new_key[8:]
+                
             new_state_dict[new_key] = v
         
         model.load_state_dict(new_state_dict, strict=False)
-        print(f"权重加载完成 (处理了 {prefix_count} 个带前缀的键)")
+        print(f"权重加载完成 (跳过了 {decoder_count} 个decoder/target_encoder权重)")
     else:
         print("提示: 未找到权重文件，模型使用随机初始化权重")
     
@@ -275,7 +259,8 @@ def main():
             timestamps=torch.tensor([[[22, 7, 2025]]], dtype=torch.int64).to(args.device),  # 整数类型，与官方一致
         )
         
-        output = model.encoder(sample, fast_pass=True, patch_size=args.patch_size)
+        # 直接调用 encoder（不再是 model.encoder）
+        output = model(sample, fast_pass=True, patch_size=args.patch_size)
         tokens_and_masks = output["tokens_and_masks"]
         features = tokens_and_masks.sentinel2_l2a  # [B, P_H, P_W, T, D]
         pooled = features.mean(dim=[1, 2, 3])  # [B, D]
