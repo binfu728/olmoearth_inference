@@ -265,10 +265,11 @@ def main():
     
     with torch.no_grad():
         # mask设为None，encoder内部会创建默认mask
+        # timestamps格式: [B, T, D] 其中D=[day, month, year]，月份是0-indexed
         sample = MaskedOlmoEarthSample(
             sentinel2_l2a=image_tensor.to(args.device),
             sentinel2_l2a_mask=None,  # 不使用mask
-            timestamps=torch.tensor([[[15.0, 7.0, 2025.0]]], dtype=torch.float32).to(args.device),
+            timestamps=torch.tensor([[[22, 7, 2025]]], dtype=torch.int64).to(args.device),  # 整数类型，与官方一致
         )
         
         output = model.encoder(sample, fast_pass=True, patch_size=args.patch_size)
