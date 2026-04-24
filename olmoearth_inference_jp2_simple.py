@@ -133,22 +133,24 @@ def load_model_direct():
     - depth: 12 (encoder) / 4 (decoder)
     - num_heads: 12
     - mlp_ratio: 4.0
+    
+    注意: EncoderConfig 和 PredictorConfig 中 supported_modalities 是 @property，
+    不是字段。它们通过 supported_modality_names 自动计算得出。
+    因此不要直接传递 supported_modalities 参数。
     """
     from nn.galileo import Galileo
     from nn.flexi_vit import EncoderConfig, PredictorConfig
-    from data.constants import get_modality_specs_from_names
     
-    # 定义支持的模态
+    # 定义支持的模态（只需要传递名称列表，Config会自动计算 supported_modalities）
     modalities = [
         "sentinel2_l2a", "sentinel1", "landsat", "worldcover",
         "srtm", "openstreetmap_raster", "wri_canopy_height_map", "cdl", "worldcereal"
     ]
-    modality_specs = get_modality_specs_from_names(modalities)
     
     # Encoder配置
+    # 注意: 只传递 supported_modality_names，不要传递 supported_modalities
     encoder_config = EncoderConfig(
         supported_modality_names=modalities,
-        supported_modalities=modality_specs,
         embedding_size=768,
         max_patch_size=8,
         min_patch_size=1,
@@ -166,12 +168,13 @@ def load_model_direct():
         frozen_patch_embeddings=False,
         qk_norm=False,
         log_token_norm_stats=False,
+        use_linear_patch_embed=False,  # 必须是False以匹配checkpoint（训练时使用Conv2d）
     )
     
     # Decoder配置
+    # 注意: 只传递 supported_modality_names，不要传递 supported_modalities
     decoder_config = PredictorConfig(
         supported_modality_names=modalities,
-        supported_modalities=modality_specs,
         encoder_embedding_size=768,
         decoder_embedding_size=768,
         depth=4,
