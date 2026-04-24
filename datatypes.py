@@ -15,7 +15,7 @@ from torch.distributed import DeviceMesh
 from torch.distributed.tensor import distribute_tensor
 
 from data.constants import MISSING_VALUE, TIMESTAMPS, Modality
-from types import ArrayTensor
+from olmo_types import ArrayTensor
 
 logger = logging.getLogger(__name__)
 

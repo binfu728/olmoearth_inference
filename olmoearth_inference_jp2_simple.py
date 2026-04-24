@@ -251,12 +251,17 @@ def main():
     print(f"  预期patch数量: {args.crop_size // args.patch_size} x {args.crop_size // args.patch_size}")
     
     with torch.no_grad():
-        # mask设为None，encoder内部会创建默认mask
+        # 创建 mask（全1表示所有token都参与计算）
+        # mask格式: [B, H, W, T, C] - 与数据形状一致，所有值都是 MaskValue.ONLINE_ENCODER (0)
+        from datatypes import MaskValue
+        B, H, W, T, C = image_tensor.shape
+        mask = torch.full((B, H, W, T, C), MaskValue.ONLINE_ENCODER.value, dtype=torch.int64).to(args.device)
+        
         # timestamps格式: [B, T, D] 其中D=[day, month, year]，月份是0-indexed
         sample = MaskedOlmoEarthSample(
+            timestamps=torch.tensor([[[22, 7, 2025]]], dtype=torch.int64).to(args.device),
             sentinel2_l2a=image_tensor.to(args.device),
-            sentinel2_l2a_mask=None,  # 不使用mask
-            timestamps=torch.tensor([[[22, 7, 2025]]], dtype=torch.int64).to(args.device),  # 整数类型，与官方一致
+            sentinel2_l2a_mask=mask,
         )
         
         # 直接调用 encoder（不再是 model.encoder）
