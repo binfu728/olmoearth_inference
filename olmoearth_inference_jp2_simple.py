@@ -7,8 +7,9 @@ OlmoEarth 最简推理脚本
     python olmoearth_inference_jp2_simple.py --jp2_dir /path/to/sentinel2_safe
 
 Tensor Shape说明:
-    - sentinel2_l2a: [B, H, W, T, num_bands]  其中T=1表示单时间点（Channel-Last格式）
-    - mask不是必须的，推理时可以传None
+    - sentinel2_l2a: [B, H, W, T, C]  其中T=1表示单时间点，C=12是Sentinel-2波段数
+    - mask: [B, H, W, T, S]  S=3是band sets数量（与Inference-Quickstart.md一致）
+    - 输出features: [B, W', H', T, S, D]  经过pooled=mean(dim=[3,4])变成[B, W', H', D]
 """
 
 import argparse
@@ -101,7 +102,7 @@ def normalize_image(image: np.ndarray) -> np.ndarray:
     return normalized
 
 
-def prepare_input(normalized_image: np.ndarray, crop_size: int = 128) -> torch.Tensor:
+def prepare_input(normalized_image: np.ndarray, crop_size: int = 128) -> tuple[torch.Tensor, torch.Tensor]:
     """准备模型输入
     
     Args:
@@ -109,7 +110,8 @@ def prepare_input(normalized_image: np.ndarray, crop_size: int = 128) -> torch.T
         crop_size: 裁剪大小
     
     Returns:
-        image_tensor: [1, H, W, 1, num_bands] - 与MaskedOlmoEarthSample.sentinel2_l2a格式一致
+        image_tensor: [1, H, W, 1, C] - 与MaskedOlmoEarthSample.sentinel2_l2a格式一致
+        mask: [1, H, W, 1, S] - band sets维度是S=3
     """
     h, w = normalized_image.shape[:2]
     
@@ -122,7 +124,14 @@ def prepare_input(normalized_image: np.ndarray, crop_size: int = 128) -> torch.T
     image_tensor = torch.tensor(cropped, dtype=torch.float32).unsqueeze(0).unsqueeze(3)
     
     print(f"输入准备完成: {image_tensor.shape} (B=1, H={crop_size}, W={crop_size}, T=1, C={cropped.shape[-1]})")
-    return image_tensor
+    
+    # 创建mask: [B, H, W, T, S] - S=3是band sets数量
+    from datatypes import MaskValue
+    B, H, W, T, C = image_tensor.shape
+    S = 3  # band sets数量（与Inference-Quickstart.md一致）
+    mask = torch.full((B, H, W, T, S), MaskValue.ONLINE_ENCODER.value, dtype=torch.int64)
+    
+    return image_tensor, mask
 
 
 def load_model_direct():
@@ -176,6 +185,81 @@ def load_model_direct():
     return encoder
 
 
+def visualize_and_save(features: torch.Tensor, input_tensor: torch.Tensor, output_dir: str = "."):
+    """使用PCA可视化特征并保存
+    
+    Args:
+        features: [B, W', H', T, S, D] 模型输出特征
+        input_tensor: [B, H, W, T, C] 输入图像
+        output_dir: 输出目录
+    """
+    try:
+        from sklearn.decomposition import PCA
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("提示: 需要安装 sklearn 和 matplotlib 来保存可视化结果")
+        print("  pip install scikit-learn matplotlib")
+        return
+    
+    # 特征形状: [B, W', H', T, S, D]
+    B, W_prime, H_prime, T, S, D = features.shape
+    # 输入形状: [B, H, W, T, C]
+    _, H, W, _, C = input_tensor.shape
+    
+    # 对特征进行PCA降维到3维（RGB）
+    features_2d = features[0].reshape(-1, D)  # [W'*H'*T*S, D]
+    pca = PCA(n_components=3)
+    features_pca = pca.fit_transform(features_2d)  # [W'*H'*T*S, 3]
+    
+    # 重塑为图像格式 [W', H', T, S, 3] -> [W', H', 3]
+    features_img = features_pca.reshape(W_prime, H_prime, T, S, 3)
+    # 去掉T和S维度，取第一个时间点和第一个band set
+    features_img = features_img[:, :, 0, 0, :]  # [W', H', 3]
+    
+    # 归一化到[0,1]
+    features_img = (features_img - features_img.min()) / (features_img.max() - features_img.min() + 1e-8)
+    
+    # 保存PCA特征图（需要转置: [W', H'] -> [H', W'] 因为图像是H x W）
+    plt.figure(figsize=(12, 6))
+    plt.subplot(1, 2, 1)
+    plt.imshow(features_img.transpose(1, 0, 2))  # [W', H', 3] -> [H', W', 3]
+    plt.title(f"PCA Features (D={D} -> RGB)")
+    plt.axis('off')
+    
+    # 将输入转为可视化格式（RGB: R=B04, G=B03, B=B02）
+    input_np = input_tensor[0].cpu().numpy()  # [H, W, T, C]
+    if T > 1 or C >= 3:
+        # 取RGB波段 (B04=Red, B03=Green, B02=Blue)
+        # band_order = ['B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A', 'B09', 'B11', 'B12', 'B01']
+        input_rgb = input_np[:, :, 0, 2:5]  # B04, B03, B02 -> R, G, B
+        input_rgb = (input_rgb - input_rgb.min()) / (input_rgb.max() - input_rgb.min() + 1e-8)
+    else:
+        # 单波段可视化
+        input_rgb = np.stack([input_np[:, :, 0, 0]] * 3, axis=-1)
+        input_rgb = (input_rgb - input_rgb.min()) / (input_rgb.max() - input_rgb.min() + 1e-8)
+    
+    plt.subplot(1, 2, 2)
+    plt.imshow(input_rgb)
+    plt.title(f"Input RGB (H={H}, W={W}, C={C})")
+    plt.axis('off')
+    
+    plt.tight_layout()
+    output_path = Path(output_dir) / "feature_visualization.png"
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"可视化结果已保存: {output_path}")
+    
+    # 单独保存原图
+    input_path = Path(output_dir) / "input_rgb.png"
+    plt.figure(figsize=(6, 6))
+    plt.imshow(input_rgb)
+    plt.title(f"Input RGB")
+    plt.axis('off')
+    plt.savefig(input_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"原图已保存: {input_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="OlmoEarth Inference")
     parser.add_argument("--jp2_dir", type=str, required=True, help="Sentinel-2 SAFE文件夹路径")
@@ -183,6 +267,7 @@ def main():
     parser.add_argument("--patch_size", type=int, default=4, help="Patch大小")
     parser.add_argument("--target_size", type=int, default=512, help="读取图像尺寸")
     parser.add_argument("--device", type=str, default="cuda", help="设备")
+    parser.add_argument("--output_dir", type=str, default=str(Path(__file__).parent), help="输出目录")
     
     args = parser.parse_args()
     
@@ -200,9 +285,9 @@ def main():
     print("\n[2/4] 归一化...")
     normalized = normalize_image(image)
     
-    # 3. 准备输入（不使用mask，只传数据）
+    # 3. 准备输入
     print("\n[3/4] 准备输入...")
-    image_tensor = prepare_input(normalized, args.crop_size)
+    image_tensor, mask = prepare_input(normalized, args.crop_size)
     
     # 4. 构建模型
     print("\n[4/4] 构建模型...")
@@ -244,39 +329,39 @@ def main():
     else:
         print("提示: 未找到权重文件，模型使用随机初始化权重")
     
-    # 推理（不使用mask）
+    # 推理
     print("\n运行推理...")
     print(f"  patch_size: {args.patch_size}")
     print(f"  crop_size: {args.crop_size}")
     print(f"  预期patch数量: {args.crop_size // args.patch_size} x {args.crop_size // args.patch_size}")
     
     with torch.no_grad():
-        # 创建 mask（全1表示所有token都参与计算）
-        # mask格式: [B, H, W, T, C] - 与数据形状一致，所有值都是 MaskValue.ONLINE_ENCODER (0)
-        from datatypes import MaskValue
-        B, H, W, T, C = image_tensor.shape
-        mask = torch.full((B, H, W, T, C), MaskValue.ONLINE_ENCODER.value, dtype=torch.int64).to(args.device)
-        
         # timestamps格式: [B, T, D] 其中D=[day, month, year]，月份是0-indexed
         sample = MaskedOlmoEarthSample(
             timestamps=torch.tensor([[[22, 7, 2025]]], dtype=torch.int64).to(args.device),
             sentinel2_l2a=image_tensor.to(args.device),
-            sentinel2_l2a_mask=mask,
+            sentinel2_l2a_mask=mask.to(args.device),
         )
         
         # 直接调用 encoder（不再是 model.encoder）
         output = model(sample, fast_pass=True, patch_size=args.patch_size)
         tokens_and_masks = output["tokens_and_masks"]
-        features = tokens_and_masks.sentinel2_l2a  # [B, P_H, P_W, T, D]
-        pooled = features.mean(dim=[1, 2, 3])  # [B, D]
+        # 输出: [B, W', H', T, S, D] 与 Inference-Quickstart.md 一致
+        features = tokens_and_masks.sentinel2_l2a
+        
+        # pooled: mean(dim=[3, 4]) 去掉 T 和 S 维度 -> [B, W', H', D]
+        pooled = features.mean(dim=[3, 4])
     
     print("\n" + "=" * 60)
     print("结果:")
-    print(f"  Input shape: {image_tensor.shape}")
-    print(f"  Output feature shape: {features.shape}")
-    print(f"  Pooled shape: {pooled.shape}")
-    print(f"  Pooled (first 5): {pooled[0, :5].cpu().numpy()}")
+    print(f"  Input shape: {image_tensor.shape} (B, H, W, T, C)")
+    print(f"  Output feature shape: {features.shape} (B, W', H', T, S, D)")
+    print(f"  Pooled shape: {pooled.shape} (B, W', H', D)")
+    print(f"  Pooled (first 5): {pooled[0, 0, 0, :5].cpu().numpy()}")
     print("=" * 60)
+    
+    # 可视化特征
+    visualize_and_save(features, image_tensor, args.output_dir)
 
 
 if __name__ == "__main__":
