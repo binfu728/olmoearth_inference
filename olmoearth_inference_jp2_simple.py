@@ -9,7 +9,7 @@ OlmoEarth 最简推理脚本
 Tensor Shape说明:
     - sentinel2_l2a: [B, H, W, T, C]  其中T=1表示单时间点，C=12是Sentinel-2波段数
     - mask: [B, H, W, T, S]  S=3是band sets数量（与Inference-Quickstart.md一致）
-    - 输出features: [B, W', H', T, S, D]  经过pooled=mean(dim=[3,4])变成[B, W', H', D]
+    - 输出features: [B, H', W', T, S, D]  经过pooled=mean(dim=[3,4])变成[B, H', W', D]
 """
 
 import argparse
@@ -189,7 +189,7 @@ def visualize_and_save(features: torch.Tensor, input_tensor: torch.Tensor, outpu
     """使用PCA可视化特征并保存
     
     Args:
-        features: [B, W', H', T, S, D] 模型输出特征
+        features: [B, H', W', T, S, D] 模型输出特征
         input_tensor: [B, H, W, T, C] 输入图像
         output_dir: 输出目录
     """
@@ -201,28 +201,29 @@ def visualize_and_save(features: torch.Tensor, input_tensor: torch.Tensor, outpu
         print("  pip install scikit-learn matplotlib")
         return
     
-    # 特征形状: [B, W', H', T, S, D]
-    B, W_prime, H_prime, T, S, D = features.shape
+    # 特征形状: [B, H', W', T, S, D]
+    B, H_prime, W_prime, T, S, D = features.shape
     # 输入形状: [B, H, W, T, C]
     _, H, W, _, C = input_tensor.shape
     
     # 对特征进行PCA降维到3维（RGB）
-    features_2d = features[0].reshape(-1, D)  # [W'*H'*T*S, D]
+    # 先转到CPU，避免GPU无法运行sklearn
+    features_2d = features[0].detach().cpu().numpy().reshape(-1, D)  # [H'*W'*T*S, D]
     pca = PCA(n_components=3)
-    features_pca = pca.fit_transform(features_2d)  # [W'*H'*T*S, 3]
+    features_pca = pca.fit_transform(features_2d)  # [H'*W'*T*S, 3]
     
-    # 重塑为图像格式 [W', H', T, S, 3] -> [W', H', 3]
-    features_img = features_pca.reshape(W_prime, H_prime, T, S, 3)
+    # 重塑为图像格式 [H', W', T, S, 3] -> [H', W', 3]
+    features_img = features_pca.reshape(H_prime, W_prime, T, S, 3)
     # 去掉T和S维度，取第一个时间点和第一个band set
-    features_img = features_img[:, :, 0, 0, :]  # [W', H', 3]
+    features_img = features_img[:, :, 0, 0, :]  # [H', W', 3]
     
     # 归一化到[0,1]
     features_img = (features_img - features_img.min()) / (features_img.max() - features_img.min() + 1e-8)
     
-    # 保存PCA特征图（需要转置: [W', H'] -> [H', W'] 因为图像是H x W）
+    # 保存PCA特征图（已经是 [H', W', 3] 格式，直接显示）
     plt.figure(figsize=(12, 6))
     plt.subplot(1, 2, 1)
-    plt.imshow(features_img.transpose(1, 0, 2))  # [W', H', 3] -> [H', W', 3]
+    plt.imshow(features_img)  # [H', W', 3]
     plt.title(f"PCA Features (D={D} -> RGB)")
     plt.axis('off')
     
@@ -346,17 +347,17 @@ def main():
         # 直接调用 encoder（不再是 model.encoder）
         output = model(sample, fast_pass=True, patch_size=args.patch_size)
         tokens_and_masks = output["tokens_and_masks"]
-        # 输出: [B, W', H', T, S, D] 与 Inference-Quickstart.md 一致
+        # 输出: [B, H', W', T, S, D] 与 Inference-Quickstart.md 一致
         features = tokens_and_masks.sentinel2_l2a
         
-        # pooled: mean(dim=[3, 4]) 去掉 T 和 S 维度 -> [B, W', H', D]
+        # pooled: mean(dim=[3, 4]) 去掉 T 和 S 维度 -> [B, H', W', D]
         pooled = features.mean(dim=[3, 4])
     
     print("\n" + "=" * 60)
     print("结果:")
     print(f"  Input shape: {image_tensor.shape} (B, H, W, T, C)")
-    print(f"  Output feature shape: {features.shape} (B, W', H', T, S, D)")
-    print(f"  Pooled shape: {pooled.shape} (B, W', H', D)")
+    print(f"  Output feature shape: {features.shape} (B, H', W', T, S, D)")
+    print(f"  Pooled shape: {pooled.shape} (B, H', W', D)")
     print(f"  Pooled (first 5): {pooled[0, 0, 0, :5].cpu().numpy()}")
     print("=" * 60)
     
